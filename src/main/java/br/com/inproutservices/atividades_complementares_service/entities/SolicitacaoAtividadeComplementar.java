@@ -38,6 +38,9 @@ public class SolicitacaoAtividadeComplementar {
     @Column(nullable = false)
     private Integer quantidade;
 
+    @Column(columnDefinition = "TEXT", name = "alteracoes_propostas_json")
+    private String alteracoesPropostasJson;
+
     @Column(columnDefinition = "TEXT")
     private String justificativa;
 

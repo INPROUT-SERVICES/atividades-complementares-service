@@ -32,8 +32,9 @@ public class SolicitacaoController {
     }
 
     @GetMapping("/pendentes")
-    public ResponseEntity<List<SolicitacaoDTO.Response>> listarPendentes() {
-        List<SolicitacaoAtividadeComplementar> lista = service.listarPendentes();
+    public ResponseEntity<List<SolicitacaoDTO.Response>> listarPendentes(@RequestParam(value = "role", required = false) String role) {
+        // Passamos a role para o service filtrar a fila correta
+        List<SolicitacaoAtividadeComplementar> lista = service.listarPendentes(role);
         return ResponseEntity.ok(lista.stream().map(SolicitacaoDTO.Response::new).toList());
     }
 
@@ -43,7 +44,8 @@ public class SolicitacaoController {
         return ResponseEntity.ok(lista.stream().map(SolicitacaoDTO.Response::new).toList());
     }
 
-    // Ações Coordenador
+    // --- AÇÕES DO COORDENADOR (Gera Proposta) ---
+
     @PostMapping("/{id}/coordenador/aprovar")
     public ResponseEntity<SolicitacaoDTO.Response> aprovarCoordenador(
             @PathVariable Long id,
@@ -60,7 +62,8 @@ public class SolicitacaoController {
         return ResponseEntity.ok(new SolicitacaoDTO.Response(s));
     }
 
-    // Ações Controller
+    // --- AÇÕES DO CONTROLLER (Aplica Mudanças no Monólito) ---
+
     @PostMapping("/{id}/controller/aprovar")
     public ResponseEntity<SolicitacaoDTO.Response> aprovarController(
             @PathVariable Long id,

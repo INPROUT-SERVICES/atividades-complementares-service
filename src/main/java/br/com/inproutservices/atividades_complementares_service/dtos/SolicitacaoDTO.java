@@ -9,10 +9,10 @@ public class SolicitacaoDTO {
     public record Request(
             Long osId,
             Long lpuId,
-            Double valorUnitarioLpu, // Frontend envia ou Service busca via Feign
+            Double valorUnitarioLpu,
             Integer quantidade,
             Long solicitanteId,
-            String solicitanteNome, // Opcional: para snapshot
+            String solicitanteNome,
             String justificativa
     ) {}
 
@@ -25,7 +25,9 @@ public class SolicitacaoDTO {
             Integer quantidadeAprovada,
             String boqAprovado,
             String statusRegistroAprovado,
-            Double valorTotalEstimado, // Calculado (valorSnapshot * qtd)
+            String justificativaCoordenador, // Adicionado para o Controller ver a justificativa
+            String alteracoesPropostasJson,  // <--- OBRIGATÓRIO PARA O CONTROLLER VER AS EDIÇÕES
+            Double valorTotalEstimado,
             String justificativa,
             StatusSolicitacaoComplementar status,
             LocalDateTime dataSolicitacao,
@@ -41,6 +43,8 @@ public class SolicitacaoDTO {
                     s.getQuantidadeAprovada(),
                     s.getBoqAprovado(),
                     s.getStatusRegistroAprovado(),
+                    s.getJustificativaCoordenador(),
+                    s.getAlteracoesPropostasJson(), // <--- Mapeando aqui
                     (s.getValorUnitarioSnapshot() != null ? s.getValorUnitarioSnapshot() * s.getQuantidade() : 0.0),
                     s.getJustificativa(),
                     s.getStatus(),
@@ -52,11 +56,12 @@ public class SolicitacaoDTO {
 
     public record EdicaoCoordenadorDTO(
             Long aprovadorId,
-            Long lpuId, // Pode ser nova LPU
+            Long lpuId,
             Integer quantidade,
             String boq,
             String statusRegistro,
-            String justificativa
+            String justificativa,
+            String alteracoesItensExistentesJson
     ) {}
 
     public record AcaoDTO(

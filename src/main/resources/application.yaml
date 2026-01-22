@@ -1,3 +1,27 @@
+server:
+  port: 8082 # Porta diferente do monólito (geralmente 8080) para rodar junto
+
 spring:
   application:
     name: atividades-complementares-service
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:5432/atividades_complementares_db
+    username: postgres
+    password: sua_senha_aqui
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: update # Cria as tabelas automaticamente (use 'validate' ou 'none' em produção)
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+# Configuração básica de Log para ver erros
+logging:
+  level:
+    br.com.inproutservices: DEBUG
+    org.springframework.web: INFO

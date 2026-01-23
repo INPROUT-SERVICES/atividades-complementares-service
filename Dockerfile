@@ -6,7 +6,7 @@ COPY src ./src
 RUN mvn clean package -DskipTests
 
 # 2. Run
-# CORREÇÃO: Usando Amazon Corretto (Slim/Alpine) que é compatível e existe
+# CORREÇÃO: Usando Amazon Corretto (Slim/Alpine) que é compatível e existe.
 FROM amazoncorretto:21-alpine
 WORKDIR /app
 COPY --from=build /app/target/*.jar app.jar

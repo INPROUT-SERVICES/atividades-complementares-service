@@ -7,10 +7,18 @@ import br.com.inproutservices.atividades_complementares_service.repositories.Sol
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityNotFoundException;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.boot.web.client.RestTemplateBuilder;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
@@ -24,15 +32,42 @@ public class SolicitacaoService {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
 
-    // URL do Monólito dentro da rede Docker (nome do container)
-    // Se estiver rodando local sem docker, use "http://localhost:8080"
+    // URL do Monólito
     private static final String MONOLITO_URL = "http://inprout-monolito:8080";
 
-    public SolicitacaoService(SolicitacaoAtividadeComplementarRepository repository, RestTemplateBuilder restTemplateBuilder) {
+    public SolicitacaoService(SolicitacaoAtividadeComplementarRepository repository, RestTemplateBuilder builder) {
         this.repository = repository;
-        this.restTemplate = restTemplateBuilder.build();
+        // Habilita PATCH no RestTemplate
+        this.restTemplate = builder
+                .requestFactory(() -> new HttpComponentsClientHttpRequestFactory())
+                .build();
         this.objectMapper = new ObjectMapper();
     }
+
+    // --- MÉTODOS AUXILIARES DE INTEGRAÇÃO ---
+
+    /**
+     * Cria os headers HTTP incluindo o Token JWT da requisição atual.
+     * Isso permite que o microsserviço se autentique no monólito como o usuário logado.
+     */
+    private HttpEntity<Object> createHttpEntity(Object body) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        // Pega o token da requisição atual que chegou no Controller
+        ServletRequestAttributes attributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+        if (attributes != null) {
+            HttpServletRequest request = attributes.getRequest();
+            String authHeader = request.getHeader("Authorization");
+            if (authHeader != null) {
+                headers.set("Authorization", authHeader);
+            }
+        }
+
+        return new HttpEntity<>(body, headers);
+    }
+
+    // --- MÉTODOS DE NEGÓCIO ---
 
     @Transactional
     public SolicitacaoAtividadeComplementar criar(SolicitacaoDTO.Request dto) {
@@ -54,9 +89,6 @@ public class SolicitacaoService {
                 .orElseThrow(() -> new EntityNotFoundException("Solicitação não encontrada: " + id));
     }
 
-    /**
-     * Filtra pendências por ROLE.
-     */
     public List<SolicitacaoAtividadeComplementar> listarPendentes(String role) {
         if (role == null) return Collections.emptyList();
         String roleUpper = role.toUpperCase();
@@ -69,7 +101,6 @@ public class SolicitacaoService {
         } else if (roleUpper.contains("CONTROLLER")) {
             return repository.findByStatus(StatusSolicitacaoComplementar.PENDENTE_CONTROLLER);
         } else {
-            // Default: Coordenador
             return repository.findByStatus(StatusSolicitacaoComplementar.PENDENTE_COORDENADOR);
         }
     }
@@ -86,14 +117,12 @@ public class SolicitacaoService {
             throw new RuntimeException("Status inválido para ação do coordenador.");
         }
 
-        // Define a proposta para o item NOVO
         s.setLpuAprovadaId(dto.lpuId());
         s.setQuantidadeAprovada(dto.quantidade());
         s.setBoqAprovado(dto.boq());
         s.setStatusRegistroAprovado(dto.statusRegistro());
         s.setJustificativaCoordenador(dto.justificativa());
 
-        // Salva o JSON das alterações propostas nos itens ANTIGOS
         if (dto.alteracoesItensExistentesJson() != null && !dto.alteracoesItensExistentesJson().isBlank()) {
             s.setAlteracoesPropostasJson(dto.alteracoesItensExistentesJson());
         }
@@ -114,7 +143,7 @@ public class SolicitacaoService {
         }
 
         try {
-            // 1. APLICAR ALTERAÇÕES NOS ITENS EXISTENTES (Se houver Proposta)
+            // 1. APLICAR ALTERAÇÕES NOS ITENS EXISTENTES (Com Token Repassado)
             if (s.getAlteracoesPropostasJson() != null && !s.getAlteracoesPropostasJson().isBlank()) {
                 List<Map<String, Object>> alteracoes = objectMapper.readValue(
                         s.getAlteracoesPropostasJson(),
@@ -124,26 +153,25 @@ public class SolicitacaoService {
                 for (Map<String, Object> alt : alteracoes) {
                     Long itemId = ((Number) alt.get("itemId")).longValue();
 
-                    // Se tiver mudança de status
+                    // PATCH: Alterar Status
                     if (alt.containsKey("novoStatus")) {
                         String novoStatus = (String) alt.get("novoStatus");
-                        restTemplate.patchForObject(
+
+                        // Usa exchange para poder passar Headers com Token
+                        restTemplate.exchange(
                                 MONOLITO_URL + "/os/detalhe/" + itemId + "/status",
-                                Map.of("status", novoStatus),
+                                HttpMethod.PATCH,
+                                createHttpEntity(Map.of("status", novoStatus)),
                                 Void.class
                         );
                     }
 
-                    // Se tiver edição de valores (LPU, Qtd, BOQ)
+                    // PUT: Alterar Valores
                     if (alt.containsKey("novaQtd") || alt.containsKey("novaLpuId")) {
-                        // Monta payload de atualização
-                        // Nota: O backend do monólito espera { lpu: {id: ...}, quantidade: ..., boq: ... }
-                        Object novaLpuId = alt.get("novaLpuId"); // Pode ser null se não mudou, tratar se necessário
+                        Object novaLpuId = alt.get("novaLpuId");
                         Object novaQtd = alt.get("novaQtd");
                         Object novoBoq = alt.get("novoBoq");
 
-                        // Aqui assumimos que se o campo veio no JSON, ele deve ser atualizado.
-                        // O ideal seria buscar o item original para fazer merge, mas vamos mandar o que temos.
                         if (novaLpuId != null && novaQtd != null) {
                             Map<String, Object> updatePayload = Map.of(
                                     "quantidade", novaQtd,
@@ -151,17 +179,18 @@ public class SolicitacaoService {
                                     "lpu", Map.of("id", novaLpuId)
                             );
 
-                            restTemplate.put(
+                            restTemplate.exchange(
                                     MONOLITO_URL + "/os/detalhe/" + itemId,
-                                    updatePayload
+                                    HttpMethod.PUT,
+                                    createHttpEntity(updatePayload),
+                                    Void.class
                             );
                         }
                     }
                 }
             }
 
-            // 2. CRIAR O NOVO ITEM (Solicitado e Aprovado)
-            // Endpoint imaginário: POST /os/detalhe (Adicionar item na OS)
+            // 2. CRIAR O NOVO ITEM (Com Token Repassado)
             Map<String, Object> novoItemPayload = Map.of(
                     "os", Map.of("id", s.getOsId()),
                     "lpu", Map.of("id", s.getLpuAprovadaId()),
@@ -170,12 +199,15 @@ public class SolicitacaoService {
                     "statusRegistro", s.getStatusRegistroAprovado() != null ? s.getStatusRegistroAprovado() : "ATIVO"
             );
 
-            // Chama o endpoint de criação no monólito
-            // Dica: Verifique se o seu controller de OS tem um método POST para criar itens
-            restTemplate.postForObject(MONOLITO_URL + "/os/detalhe", novoItemPayload, Object.class);
+            restTemplate.postForObject(
+                    MONOLITO_URL + "/os/detalhe",
+                    createHttpEntity(novoItemPayload),
+                    Object.class
+            );
 
         } catch (Exception e) {
             e.printStackTrace();
+            // Pega a mensagem de erro interna do HttpClient se houver
             throw new RuntimeException("Erro ao integrar com o Monólito: " + e.getMessage());
         }
 
@@ -203,7 +235,6 @@ public class SolicitacaoService {
             s.setStatus(StatusSolicitacaoComplementar.PENDENTE_COORDENADOR);
             s.setJustificativaController(motivo);
         } else {
-            // Fallback
             s.setStatus(StatusSolicitacaoComplementar.REJEITADO);
             s.setMotivoRecusa(motivo);
         }

@@ -13,6 +13,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity; // <--- IMPORT ADICIONADO
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,7 +33,6 @@ public class SolicitacaoService {
     private final ObjectMapper objectMapper;
 
     // Cache simples para evitar chamar o monólito repetidamente para a mesma OS na mesma requisição
-    // (Em um cenário real, usar um Cache Manager como Caffeine ou Redis)
     private final Map<Long, Long> cacheSegmentoOs = new HashMap<>();
 
     public SolicitacaoService(SolicitacaoAtividadeComplementarRepository repository, RestTemplateBuilder builder) {
@@ -97,13 +97,12 @@ public class SolicitacaoService {
         // 1. Descobre o segmento do usuário logado
         Long segmentoUsuarioId = buscarSegmentoDoUsuario(userId);
         if (segmentoUsuarioId == null) {
-            // Se não tem segmento, por segurança, retorna vazio ou tudo?
-            // Geralmente quem não tem segmento não deve ver nada segmentado.
+            // Se não tem segmento, retorna vazio por segurança
             return Collections.emptyList();
         }
 
         // 2. Filtra a lista verificando o segmento de cada OS
-        cacheSegmentoOs.clear(); // Limpa cache local
+        cacheSegmentoOs.clear(); // Limpa cache local da requisição
         return lista.stream()
                 .filter(solicitacao -> {
                     Long segmentoOsId = buscarSegmentoDaOs(solicitacao.getOsId());
@@ -140,13 +139,12 @@ public class SolicitacaoService {
         } catch (Exception e) {
             System.err.println("Erro ao buscar segmento da OS " + osId + ": " + e.getMessage());
         }
-        return null; // Segmento não encontrado ou OS sem segmento
+        return null;
     }
 
     // --- INTEGRAÇÃO ROBUSTA COM O MONÓLITO ---
 
     private List<String> getUrlsMonolito() {
-        // Tenta várias URLs para garantir conexão em diferentes ambientes (Docker, Local, etc)
         return List.of(
                 "http://inprout-monolito:8080",
                 "http://inprout-monolito-homolog:8080",
@@ -158,7 +156,6 @@ public class SolicitacaoService {
     private Map<String, Object> buscarNoMonolito(String path) {
         String pathClean = path.startsWith("/") ? path : "/" + path;
 
-        // Tenta cada URL configurada
         for (String baseUrl : getUrlsMonolito()) {
             try {
                 String fullUrl = baseUrl + pathClean;
@@ -194,7 +191,7 @@ public class SolicitacaoService {
         return new HttpEntity<>(body, headers);
     }
 
-    // --- MÉTODOS DE CRIAÇÃO E APROVAÇÃO (MANTIDOS) ---
+    // --- MÉTODOS DE CRIAÇÃO E APROVAÇÃO ---
 
     @Transactional
     public SolicitacaoAtividadeComplementar criar(SolicitacaoDTO.Request dto) {
@@ -278,12 +275,7 @@ public class SolicitacaoService {
     }
 
     private void aplicarAlteracoesNoMonolito(SolicitacaoAtividadeComplementar s) throws Exception {
-        // Lógica de integração mantida, mas usando o método robusto para obter URL base se necessário
-        // (Aqui mantive o uso direto do restTemplate.exchange pois já implementa a lógica complexa de retry/URLs no buscarNoMonolito,
-        // mas para operações de escrita (POST/PUT/PATCH) é ideal usar a mesma lógica de descoberta de URL se o MONOLITO_URL fixo falhar.
-        // Por simplificação, vou usar a primeira URL válida encontrada ou a padrão)
-
-        String baseUrl = getUrlsMonolito().get(0); // Pega a primeira (docker service name)
+        String baseUrl = getUrlsMonolito().get(0);
 
         if (s.getAlteracoesPropostasJson() != null && !s.getAlteracoesPropostasJson().isBlank()) {
             List<Map<String, Object>> alteracoes = objectMapper.readValue(s.getAlteracoesPropostasJson(), new TypeReference<List<Map<String, Object>>>() {});

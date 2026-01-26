@@ -31,10 +31,25 @@ public class SolicitacaoController {
         return ResponseEntity.ok(new SolicitacaoDTO.Response(service.buscarPorId(id)));
     }
 
+    // --- PENDÊNCIAS COM FILTRO DE SEGMENTO ---
     @GetMapping("/pendentes")
-    public ResponseEntity<List<SolicitacaoDTO.Response>> listarPendentes(@RequestParam(value = "role", required = false) String role) {
-        // Passamos a role para o service filtrar a fila correta
-        List<SolicitacaoAtividadeComplementar> lista = service.listarPendentes(role);
+    public ResponseEntity<List<SolicitacaoDTO.Response>> listarPendentes(
+            @RequestParam(value = "role", required = false) String roleParam, // Legado (query param)
+            @RequestHeader(value = "X-User-Role", required = false) String roleHeader, // Novo (header)
+            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+
+        String role = (roleHeader != null && !roleHeader.isBlank()) ? roleHeader : roleParam;
+        List<SolicitacaoAtividadeComplementar> lista = service.listarPendentes(role, userId);
+        return ResponseEntity.ok(lista.stream().map(SolicitacaoDTO.Response::new).toList());
+    }
+
+    // --- HISTÓRICO COM FILTRO DE SEGMENTO ---
+    @GetMapping("/historico")
+    public ResponseEntity<List<SolicitacaoDTO.Response>> listarHistoricoGeral(
+            @RequestHeader(value = "X-User-Role", required = false) String role,
+            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+
+        List<SolicitacaoAtividadeComplementar> lista = service.listarHistorico(role, userId);
         return ResponseEntity.ok(lista.stream().map(SolicitacaoDTO.Response::new).toList());
     }
 
@@ -44,38 +59,32 @@ public class SolicitacaoController {
         return ResponseEntity.ok(lista.stream().map(SolicitacaoDTO.Response::new).toList());
     }
 
-    // --- AÇÕES DO COORDENADOR (Gera Proposta) ---
+    // --- AÇÕES ---
 
     @PostMapping("/{id}/coordenador/aprovar")
     public ResponseEntity<SolicitacaoDTO.Response> aprovarCoordenador(
-            @PathVariable Long id,
-            @RequestBody SolicitacaoDTO.EdicaoCoordenadorDTO dto) {
+            @PathVariable Long id, @RequestBody SolicitacaoDTO.EdicaoCoordenadorDTO dto) {
         SolicitacaoAtividadeComplementar s = service.aprovarPeloCoordenador(id, dto);
         return ResponseEntity.ok(new SolicitacaoDTO.Response(s));
     }
 
     @PostMapping("/{id}/coordenador/rejeitar")
     public ResponseEntity<SolicitacaoDTO.Response> rejeitarCoordenador(
-            @PathVariable Long id,
-            @RequestBody SolicitacaoDTO.AcaoDTO dto) {
+            @PathVariable Long id, @RequestBody SolicitacaoDTO.AcaoDTO dto) {
         SolicitacaoAtividadeComplementar s = service.rejeitar(id, dto.aprovadorId(), dto.motivo(), "COORDINATOR");
         return ResponseEntity.ok(new SolicitacaoDTO.Response(s));
     }
 
-    // --- AÇÕES DO CONTROLLER (Aplica Mudanças no Monólito) ---
-
     @PostMapping("/{id}/controller/aprovar")
     public ResponseEntity<SolicitacaoDTO.Response> aprovarController(
-            @PathVariable Long id,
-            @RequestBody SolicitacaoDTO.AcaoDTO dto) {
+            @PathVariable Long id, @RequestBody SolicitacaoDTO.AcaoDTO dto) {
         SolicitacaoAtividadeComplementar s = service.aprovarPeloController(id, dto.aprovadorId());
         return ResponseEntity.ok(new SolicitacaoDTO.Response(s));
     }
 
     @PostMapping("/{id}/controller/devolver")
     public ResponseEntity<SolicitacaoDTO.Response> devolverController(
-            @PathVariable Long id,
-            @RequestBody SolicitacaoDTO.AcaoDTO dto) {
+            @PathVariable Long id, @RequestBody SolicitacaoDTO.AcaoDTO dto) {
         SolicitacaoAtividadeComplementar s = service.rejeitar(id, dto.aprovadorId(), dto.motivo(), "CONTROLLER");
         return ResponseEntity.ok(new SolicitacaoDTO.Response(s));
     }

@@ -1,33 +1,34 @@
-HELP.md
-target/
-.mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
+### --- ADICIONAR NO FINAL --- ###
 
-### STS ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
+# Arquivos de Sistema Operacional (Obrigatório)
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-### IntelliJ IDEA ###
-.idea
-*.iws
-*.iml
-*.ipr
+# Arquivos de Backup e Temporários (Os "Pix aleatórios")
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+*.orig
+# Arquivos que o Windows cria ao mesclar conflitos
+*.rej
 
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
-build/
-!**/src/main/**/build/
-!**/src/test/**/build/
+# Dumps de erro do Java (Arquivos que parecem chaves enormes)
+hs_err_pid*
+replay_pid*
 
-### VS Code ###
-.vscode/
+# Se você usa Node/Frontend em algum momento
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Credenciais e Ambientes locais (Segurança)
+.env
+.env.local
+*.pem
+*.key

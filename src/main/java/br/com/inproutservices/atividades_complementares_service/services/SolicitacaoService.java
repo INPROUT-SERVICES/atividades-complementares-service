@@ -13,7 +13,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity; // <--- IMPORT ADICIONADO
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,7 +32,6 @@ public class SolicitacaoService {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
 
-    // Cache simples para evitar chamar o monólito repetidamente para a mesma OS na mesma requisição
     private final Map<Long, Long> cacheSegmentoOs = new HashMap<>();
 
     public SolicitacaoService(SolicitacaoAtividadeComplementarRepository repository, RestTemplateBuilder builder) {
@@ -49,7 +48,6 @@ public class SolicitacaoService {
         if (role == null) return Collections.emptyList();
         String roleUpper = role.toUpperCase();
 
-        // 1. ADMIN ou CONTROLLER: Veem tudo de acordo com o status
         if (roleUpper.contains("ADMIN")) {
             return repository.findByStatusIn(List.of(
                     StatusSolicitacaoComplementar.PENDENTE_COORDENADOR,
@@ -59,7 +57,6 @@ public class SolicitacaoService {
         else if (roleUpper.contains("CONTROLLER")) {
             return repository.findByStatus(StatusSolicitacaoComplementar.PENDENTE_CONTROLLER);
         }
-        // 2. COORDENADOR: Vê pendentes + Filtro de Segmento
         else if (roleUpper.contains("COORDINATOR") || roleUpper.contains("COORDENADOR")) {
             List<SolicitacaoAtividadeComplementar> todas = repository.findByStatus(StatusSolicitacaoComplementar.PENDENTE_COORDENADOR);
             return filtrarPorSegmentoDoUsuario(todas, userId);
@@ -73,55 +70,65 @@ public class SolicitacaoService {
         boolean ehGestorSegmentado = role != null && (role.toUpperCase().contains("COORDINATOR") || role.toUpperCase().contains("MANAGER"));
 
         if (ehAdminOuController) {
-            // Vê tudo
-            return repository.findAll();
+            // CORREÇÃO: Limita aos últimos 300 para não travar
+            return repository.findTop300ByOrderByDataSolicitacaoDesc();
         }
         else if (ehGestorSegmentado) {
-            // Vê tudo, mas filtrado pelo segmento
-            List<SolicitacaoAtividadeComplementar> todas = repository.findAll();
-            return filtrarPorSegmentoDoUsuario(todas, userId);
+            // CORREÇÃO: Busca os últimos 300 e DEPOIS filtra (muito mais rápido)
+            List<SolicitacaoAtividadeComplementar> ultimos = repository.findTop300ByOrderByDataSolicitacaoDesc();
+            return filtrarPorSegmentoDoUsuario(ultimos, userId);
         }
         else if (userId != null) {
-            // Usuário comum vê apenas as suas
+            // Usuário comum vê apenas as suas (geralmente são poucas, ok manter assim)
             return repository.findBySolicitanteId(userId);
         }
 
         return Collections.emptyList();
     }
 
-    // --- LÓGICA DE FILTRO POR SEGMENTO ---
+    // --- CORREÇÃO AQUI: LÓGICA DE FILTRO POR SEGMENTO ---
 
     private List<SolicitacaoAtividadeComplementar> filtrarPorSegmentoDoUsuario(List<SolicitacaoAtividadeComplementar> lista, Long userId) {
         if (userId == null || lista.isEmpty()) return lista;
 
-        // 1. Descobre o segmento do usuário logado
-        Long segmentoUsuarioId = buscarSegmentoDoUsuario(userId);
-        if (segmentoUsuarioId == null) {
-            // Se não tem segmento, retorna vazio por segurança
+        // 1. Busca a LISTA de IDs de segmentos do usuário (Correção de tipo)
+        List<Long> segmentosDoUsuario = buscarSegmentosDoUsuario(userId);
+
+        if (segmentosDoUsuario.isEmpty()) {
+            // Se o coordenador não tem segmento vinculado, não vê nada
             return Collections.emptyList();
         }
 
-        // 2. Filtra a lista verificando o segmento de cada OS
-        cacheSegmentoOs.clear(); // Limpa cache local da requisição
+        cacheSegmentoOs.clear();
         return lista.stream()
                 .filter(solicitacao -> {
                     Long segmentoOsId = buscarSegmentoDaOs(solicitacao.getOsId());
-                    return segmentoUsuarioId.equals(segmentoOsId);
+                    // Verifica se o segmento da OS está na lista de segmentos permitidos do usuário
+                    return segmentoOsId != null && segmentosDoUsuario.contains(segmentoOsId);
                 })
                 .collect(Collectors.toList());
     }
 
-    private Long buscarSegmentoDoUsuario(Long userId) {
+    /**
+     * CORRIGIDO: Agora busca o campo 'segmentos' (Lista) e não 'segmento' (Map)
+     */
+    private List<Long> buscarSegmentosDoUsuario(Long userId) {
         try {
             Map<String, Object> map = buscarNoMonolito("/usuarios/" + userId);
-            if (map != null && map.get("segmento") instanceof Map) {
-                Map<String, Object> segMap = (Map<String, Object>) map.get("segmento");
-                return convertToLong(segMap.get("id"));
+            // O endpoint /usuarios/{id} retorna: { "id": 1, "nome": "...", "segmentos": [10, 20] }
+            if (map != null && map.containsKey("segmentos")) {
+                Object listaObj = map.get("segmentos");
+                if (listaObj instanceof List<?>) {
+                    return ((List<?>) listaObj).stream()
+                            .map(this::convertToLong)
+                            .filter(Objects::nonNull)
+                            .collect(Collectors.toList());
+                }
             }
         } catch (Exception e) {
-            System.err.println("Erro ao buscar segmento do usuário " + userId + ": " + e.getMessage());
+            System.err.println("Erro ao buscar segmentos do usuário " + userId + ": " + e.getMessage());
         }
-        return null;
+        return Collections.emptyList();
     }
 
     private Long buscarSegmentoDaOs(Long osId) {
@@ -130,6 +137,7 @@ public class SolicitacaoService {
 
         try {
             Map<String, Object> map = buscarNoMonolito("/os/" + osId);
+            // A OS continua retornando objeto simples: { "segmento": { "id": 1, "nome": "SP" } }
             if (map != null && map.get("segmento") instanceof Map) {
                 Map<String, Object> segMap = (Map<String, Object>) map.get("segmento");
                 Long segId = convertToLong(segMap.get("id"));
@@ -142,7 +150,7 @@ public class SolicitacaoService {
         return null;
     }
 
-    // --- INTEGRAÇÃO ROBUSTA COM O MONÓLITO ---
+    // --- Restante do código (INTEGRAÇÃO, CRIAÇÃO, APROVAÇÃO) permanece igual ---
 
     private List<String> getUrlsMonolito() {
         return List.of(
@@ -155,24 +163,16 @@ public class SolicitacaoService {
 
     private Map<String, Object> buscarNoMonolito(String path) {
         String pathClean = path.startsWith("/") ? path : "/" + path;
-
         for (String baseUrl : getUrlsMonolito()) {
             try {
                 String fullUrl = baseUrl + pathClean;
-                // Usa exchange para passar o token de autenticação
                 ResponseEntity<Map> response = restTemplate.exchange(
-                        fullUrl,
-                        HttpMethod.GET,
-                        createHttpEntity(null),
-                        Map.class
+                        fullUrl, HttpMethod.GET, createHttpEntity(null), Map.class
                 );
-
                 if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
                     return (Map<String, Object>) response.getBody();
                 }
-            } catch (Exception ignored) {
-                // Tenta a próxima URL silenciosamente
-            }
+            } catch (Exception ignored) {}
         }
         return null;
     }
@@ -184,14 +184,10 @@ public class SolicitacaoService {
         if (attributes != null) {
             HttpServletRequest request = attributes.getRequest();
             String authHeader = request.getHeader("Authorization");
-            if (authHeader != null) {
-                headers.set("Authorization", authHeader);
-            }
+            if (authHeader != null) headers.set("Authorization", authHeader);
         }
         return new HttpEntity<>(body, headers);
     }
-
-    // --- MÉTODOS DE CRIAÇÃO E APROVAÇÃO ---
 
     @Transactional
     public SolicitacaoAtividadeComplementar criar(SolicitacaoDTO.Request dto) {
@@ -299,4 +295,6 @@ public class SolicitacaoService {
         if (o instanceof Number) return ((Number) o).longValue();
         try { return Long.parseLong(o.toString()); } catch(Exception e) { return null; }
     }
+
+
 }

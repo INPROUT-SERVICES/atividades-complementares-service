@@ -17,6 +17,6 @@ public interface SolicitacaoAtividadeComplementarRepository extends JpaRepositor
 
     List<SolicitacaoAtividadeComplementar> findBySolicitanteId(Long solicitanteId);
 
-    // Nota: Filtros por "Segmento" agora são complexos pois o Segmento está no serviço de Usuário/OS.
-    // Inicialmente buscaremos por status e o filtro de segmento deve ser feito em memória ou via cross-service query se necessário.
+    List<SolicitacaoAtividadeComplementar> findTop300ByOrderByDataSolicitacaoDesc();
+
 }

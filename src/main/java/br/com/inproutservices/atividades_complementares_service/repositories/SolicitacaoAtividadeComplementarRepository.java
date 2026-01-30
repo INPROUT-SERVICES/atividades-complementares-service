@@ -19,4 +19,11 @@ public interface SolicitacaoAtividadeComplementarRepository extends JpaRepositor
 
     List<SolicitacaoAtividadeComplementar> findTop300ByOrderByDataSolicitacaoDesc();
 
+    List<SolicitacaoAtividadeComplementar> findByStatusAndSegmentoIdIn(
+            StatusSolicitacaoComplementar status,
+            List<Long> segmentoIds
+    );
+
+    List<SolicitacaoAtividadeComplementar> findTop300BySegmentoIdInOrderByDataSolicitacaoDesc(List<Long> segmentoIds);
+
 }

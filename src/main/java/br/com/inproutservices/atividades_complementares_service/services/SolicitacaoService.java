@@ -52,18 +52,36 @@ public class SolicitacaoService {
         if (role == null) return Collections.emptyList();
         String roleUpper = role.toUpperCase();
 
-        if (roleUpper.contains("ADMIN")) {
-            return repository.findByStatusIn(List.of(
-                    StatusSolicitacaoComplementar.PENDENTE_COORDENADOR,
-                    StatusSolicitacaoComplementar.PENDENTE_CONTROLLER
-            ));
+        // 1. ADMIN ou CONTROLLER: Vê TUDO (sem restrição de segmento, conforme solicitado)
+        if (roleUpper.contains("ADMIN") || roleUpper.contains("CONTROLLER")) {
+            // Se for Controller, foca apenas no status dele
+            StatusSolicitacaoComplementar statusAlvo = roleUpper.contains("CONTROLLER")
+                    ? StatusSolicitacaoComplementar.PENDENTE_CONTROLLER
+                    : StatusSolicitacaoComplementar.PENDENTE_COORDENADOR; // ou ambos para Admin
+
+            if (roleUpper.contains("ADMIN")) {
+                return repository.findByStatusIn(List.of(
+                        StatusSolicitacaoComplementar.PENDENTE_COORDENADOR,
+                        StatusSolicitacaoComplementar.PENDENTE_CONTROLLER
+                ));
+            }
+            return repository.findByStatus(statusAlvo);
         }
-        else if (roleUpper.contains("CONTROLLER")) {
-            return repository.findByStatus(StatusSolicitacaoComplementar.PENDENTE_CONTROLLER);
-        }
+
+        // 2. COORDENADOR: Restrição estrita de Segmento (Query no Banco)
         else if (roleUpper.contains("COORDINATOR") || roleUpper.contains("COORDENADOR")) {
-            List<SolicitacaoAtividadeComplementar> todas = repository.findByStatus(StatusSolicitacaoComplementar.PENDENTE_COORDENADOR);
-            return filtrarPorSegmentoDoUsuario(todas, userId);
+            List<Long> segmentosDoUsuario = buscarSegmentosDoUsuario(userId);
+
+            if (segmentosDoUsuario.isEmpty()) {
+                log.warn("Coordenador ID {} tentou listar pendências mas não possui segmentos.", userId);
+                return Collections.emptyList();
+            }
+
+            // Busca direta no banco filtrando por Status E Lista de Segmentos
+            return repository.findByStatusAndSegmentoIdIn(
+                    StatusSolicitacaoComplementar.PENDENTE_COORDENADOR,
+                    segmentosDoUsuario
+            );
         }
 
         return Collections.emptyList();
@@ -71,15 +89,24 @@ public class SolicitacaoService {
 
     public List<SolicitacaoAtividadeComplementar> listarHistorico(String role, Long userId) {
         boolean ehAdminOuController = role != null && (role.toUpperCase().contains("ADMIN") || role.toUpperCase().contains("CONTROLLER"));
-        boolean ehGestorSegmentado = role != null && (role.toUpperCase().contains("COORDINATOR") || role.toUpperCase().contains("MANAGER"));
+        boolean ehGestorSegmentado = role != null && (role.toUpperCase().contains("COORDINATOR") || role.toUpperCase().contains("MANAGER") || role.toUpperCase().contains("COORDENADOR"));
 
+        // 1. ADMIN/CONTROLLER: Vê tudo
         if (ehAdminOuController) {
             return repository.findTop300ByOrderByDataSolicitacaoDesc();
         }
+        // 2. GESTOR/COORDENADOR: Filtra pelo ID do Segmento no Banco
         else if (ehGestorSegmentado) {
-            List<SolicitacaoAtividadeComplementar> ultimos = repository.findTop300ByOrderByDataSolicitacaoDesc();
-            return filtrarPorSegmentoDoUsuario(ultimos, userId);
+            List<Long> segmentosDoUsuario = buscarSegmentosDoUsuario(userId);
+
+            if (segmentosDoUsuario.isEmpty()) {
+                return Collections.emptyList();
+            }
+
+            // QUERY OTIMIZADA: Não chama o monólito para cada linha
+            return repository.findTop300BySegmentoIdInOrderByDataSolicitacaoDesc(segmentosDoUsuario);
         }
+        // 3. SOLICITANTE COMUM: Vê apenas as suas
         else if (userId != null) {
             return repository.findBySolicitanteId(userId);
         }
@@ -201,8 +228,12 @@ public class SolicitacaoService {
 
     @Transactional
     public SolicitacaoAtividadeComplementar criar(SolicitacaoDTO.Request dto) {
+        // --- ALTERAÇÃO: Busca o segmento da OS antes de salvar ---
+        Long segmentoId = buscarSegmentoDaOs(dto.osId());
+
         SolicitacaoAtividadeComplementar nova = SolicitacaoAtividadeComplementar.builder()
                 .osId(dto.osId())
+                .segmentoId(segmentoId)
                 .lpuId(dto.lpuId())
                 .quantidade(dto.quantidade())
                 .solicitanteId(dto.solicitanteId())

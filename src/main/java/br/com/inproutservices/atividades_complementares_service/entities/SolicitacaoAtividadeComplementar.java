@@ -29,6 +29,9 @@ public class SolicitacaoAtividadeComplementar {
     @Column(name = "solicitante_id", nullable = false)
     private Long solicitanteId; // ID do Usuário
 
+    @Column(name = "segmento_id")
+    private Long segmentoId;
+
     // --- DADOS SNAPSHOT (Opcional, mas recomendado para microsserviços) ---
     // Guardar o nome ou valor evita chamadas HTTP complexas apenas para listar
     private String solicitanteNomeSnapshot;

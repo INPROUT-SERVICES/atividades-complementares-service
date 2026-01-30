@@ -114,6 +114,22 @@ public class SolicitacaoService {
         return Collections.emptyList();
     }
 
+    private String descobrirUrlBaseAtiva() {
+        for (String baseUrl : getUrlsMonolito()) {
+            try {
+                // Tenta um ping simples na raiz ou health check
+                ResponseEntity<Map> response = restTemplate.exchange(
+                        baseUrl + "/", HttpMethod.GET, createHttpEntity(null), Map.class
+                );
+                if (response.getStatusCode().is2xxSuccessful()) {
+                    return baseUrl; // Retorna a URL que funcionou
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        throw new RuntimeException("Não foi possível conectar a nenhuma instância do Monólito.");
+    }
+
     // --- CORREÇÃO: LÓGICA DE FILTRO POR SEGMENTO COM LOGS ---
 
     private List<SolicitacaoAtividadeComplementar> filtrarPorSegmentoDoUsuario(List<SolicitacaoAtividadeComplementar> lista, Long userId) {
@@ -324,24 +340,47 @@ public class SolicitacaoService {
     }
 
     private void aplicarAlteracoesNoMonolito(SolicitacaoAtividadeComplementar s) throws Exception {
-        Map<String, Object> testConn = buscarNoMonolito("/");
-        // Pega a URL que funcionou ou a primeira da lista
-        String baseUrl = getUrlsMonolito().get(0);
+        // CORREÇÃO 1: Pega a URL que realmente está funcionando, não a primeira da lista fixa
+        String baseUrl = descobrirUrlBaseAtiva();
 
         if (s.getAlteracoesPropostasJson() != null && !s.getAlteracoesPropostasJson().isBlank()) {
             List<Map<String, Object>> alteracoes = objectMapper.readValue(s.getAlteracoesPropostasJson(), new TypeReference<List<Map<String, Object>>>() {});
+
             for (Map<String, Object> alt : alteracoes) {
                 Long itemId = convertToLong(alt.get("itemId"));
+
                 if (alt.containsKey("novoStatus")) {
                     restTemplate.exchange(baseUrl + "/os/detalhe/" + itemId + "/status", HttpMethod.PATCH, createHttpEntity(Map.of("status", alt.get("novoStatus"))), Void.class);
                 }
+
                 if (alt.containsKey("novaQtd")) {
-                    Map<String, Object> payload = Map.of("quantidade", alt.get("novaQtd"), "boq", alt.get("novoBoq") != null ? alt.get("novoBoq") : "", "lpu", Map.of("id", alt.get("novaLpuId")));
+                    // Previne erro se algum valor vier nulo usando HashMap
+                    Map<String, Object> payload = new HashMap<>();
+                    payload.put("quantidade", alt.get("novaQtd"));
+                    payload.put("boq", alt.get("novoBoq") != null ? alt.get("novoBoq") : "");
+                    payload.put("lpu", Map.of("id", alt.get("novaLpuId"))); // ID da LPU não pode ser nulo aqui
+
                     restTemplate.exchange(baseUrl + "/os/detalhe/" + itemId, HttpMethod.PUT, createHttpEntity(payload), Void.class);
                 }
             }
         }
-        Map<String, Object> novoItem = Map.of("os", Map.of("id", s.getOsId()), "lpu", Map.of("id", s.getLpuAprovadaId()), "quantidade", s.getQuantidadeAprovada(), "boq", s.getBoqAprovado() != null ? s.getBoqAprovado() : "", "statusRegistro", s.getStatusRegistroAprovado() != null ? s.getStatusRegistroAprovado() : "ATIVO");
+
+        // CORREÇÃO 2: Substituindo Map.of por HashMap para evitar NullPointerException se algum campo for nulo
+        Map<String, Object> novoItem = new HashMap<>();
+
+        Map<String, Object> osMap = new HashMap<>();
+        osMap.put("id", s.getOsId());
+        novoItem.put("os", osMap);
+
+        Map<String, Object> lpuMap = new HashMap<>();
+        // Garante que não envia nulo no ID da LPU
+        lpuMap.put("id", s.getLpuAprovadaId() != null ? s.getLpuAprovadaId() : 0L);
+        novoItem.put("lpu", lpuMap);
+
+        novoItem.put("quantidade", s.getQuantidadeAprovada() != null ? s.getQuantidadeAprovada() : 0);
+        novoItem.put("boq", s.getBoqAprovado() != null ? s.getBoqAprovado() : "");
+        novoItem.put("statusRegistro", s.getStatusRegistroAprovado() != null ? s.getStatusRegistroAprovado() : "ATIVO");
+
         restTemplate.postForObject(baseUrl + "/os/detalhe", createHttpEntity(novoItem), Object.class);
     }
 

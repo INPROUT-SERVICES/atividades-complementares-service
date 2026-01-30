@@ -231,10 +231,23 @@ public class SolicitacaoService {
     }
 
     @Transactional
-    public SolicitacaoAtividadeComplementar aprovarPeloController(Long id, Long aprovadorId) {
+    public SolicitacaoAtividadeComplementar aprovarPeloController(Long id, SolicitacaoDTO.EdicaoCoordenadorDTO dto) {
         SolicitacaoAtividadeComplementar s = buscarPorId(id);
-        if (s.getStatus() != StatusSolicitacaoComplementar.PENDENTE_CONTROLLER) throw new RuntimeException("Status inválido.");
+        if (s.getStatus() != StatusSolicitacaoComplementar.PENDENTE_CONTROLLER) {
+            throw new RuntimeException("Status inválido. Esperado PENDENTE_CONTROLLER.");
+        }
 
+        // 1. Atualiza os dados com o que veio da tela do Controller (caso ele tenha editado algo)
+        if (dto.lpuId() != null) s.setLpuAprovadaId(dto.lpuId());
+        if (dto.quantidade() != null) s.setQuantidadeAprovada(dto.quantidade());
+        if (dto.boq() != null) s.setBoqAprovado(dto.boq());
+        if (dto.statusRegistro() != null) s.setStatusRegistroAprovado(dto.statusRegistro());
+        // Se o controller mudar as alterações propostas nos itens existentes
+        if (dto.alteracoesItensExistentesJson() != null) {
+            s.setAlteracoesPropostasJson(dto.alteracoesItensExistentesJson());
+        }
+
+        // 2. Tenta aplicar no Monólito
         try {
             aplicarAlteracoesNoMonolito(s);
         } catch (Exception e) {
@@ -242,9 +255,11 @@ public class SolicitacaoService {
             throw new RuntimeException("Erro ao integrar com o Monólito: " + e.getMessage());
         }
 
-        s.setAprovadorControllerId(aprovadorId);
+        // 3. Finaliza
+        s.setAprovadorControllerId(dto.aprovadorId()); // Pega do DTO
         s.setDataAcaoController(LocalDateTime.now());
         s.setStatus(StatusSolicitacaoComplementar.APROVADO);
+
         return repository.save(s);
     }
 

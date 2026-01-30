@@ -77,8 +77,8 @@ public class SolicitacaoController {
 
     @PostMapping("/{id}/controller/aprovar")
     public ResponseEntity<SolicitacaoDTO.Response> aprovarController(
-            @PathVariable Long id, @RequestBody SolicitacaoDTO.AcaoDTO dto) {
-        SolicitacaoAtividadeComplementar s = service.aprovarPeloController(id, dto.aprovadorId());
+            @PathVariable Long id, @RequestBody SolicitacaoDTO.EdicaoCoordenadorDTO dto) {
+        SolicitacaoAtividadeComplementar s = service.aprovarPeloController(id, dto);
         return ResponseEntity.ok(new SolicitacaoDTO.Response(s));
     }
 

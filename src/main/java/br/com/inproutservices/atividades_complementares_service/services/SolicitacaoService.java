@@ -10,6 +10,7 @@ import jakarta.persistence.EntityNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -35,8 +36,11 @@ public class SolicitacaoService {
     private final SolicitacaoAtividadeComplementarRepository repository;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
-
     private final Map<Long, Long> cacheSegmentoOs = new HashMap<>();
+
+    // Injeta a URL definida no Docker Compose ou application.yaml
+    @Value("${APP_MONOLITH_URL:http://inprout-monolito:8080}")
+    private String monolithUrl;
 
     public SolicitacaoService(SolicitacaoAtividadeComplementarRepository repository, RestTemplateBuilder builder) {
         this.repository = repository;
@@ -52,12 +56,10 @@ public class SolicitacaoService {
         if (role == null) return Collections.emptyList();
         String roleUpper = role.toUpperCase();
 
-        // 1. ADMIN ou CONTROLLER: Vê TUDO (sem restrição de segmento, conforme solicitado)
         if (roleUpper.contains("ADMIN") || roleUpper.contains("CONTROLLER")) {
-            // Se for Controller, foca apenas no status dele
             StatusSolicitacaoComplementar statusAlvo = roleUpper.contains("CONTROLLER")
                     ? StatusSolicitacaoComplementar.PENDENTE_CONTROLLER
-                    : StatusSolicitacaoComplementar.PENDENTE_COORDENADOR; // ou ambos para Admin
+                    : StatusSolicitacaoComplementar.PENDENTE_COORDENADOR;
 
             if (roleUpper.contains("ADMIN")) {
                 return repository.findByStatusIn(List.of(
@@ -66,10 +68,7 @@ public class SolicitacaoService {
                 ));
             }
             return repository.findByStatus(statusAlvo);
-        }
-
-        // 2. COORDENADOR: Restrição estrita de Segmento (Query no Banco)
-        else if (roleUpper.contains("COORDINATOR") || roleUpper.contains("COORDENADOR")) {
+        } else if (roleUpper.contains("COORDINATOR") || roleUpper.contains("COORDENADOR")) {
             List<Long> segmentosDoUsuario = buscarSegmentosDoUsuario(userId);
 
             if (segmentosDoUsuario.isEmpty()) {
@@ -77,7 +76,6 @@ public class SolicitacaoService {
                 return Collections.emptyList();
             }
 
-            // Busca direta no banco filtrando por Status E Lista de Segmentos
             return repository.findByStatusAndSegmentoIdIn(
                     StatusSolicitacaoComplementar.PENDENTE_COORDENADOR,
                     segmentosDoUsuario
@@ -91,46 +89,48 @@ public class SolicitacaoService {
         boolean ehAdminOuController = role != null && (role.toUpperCase().contains("ADMIN") || role.toUpperCase().contains("CONTROLLER"));
         boolean ehGestorSegmentado = role != null && (role.toUpperCase().contains("COORDINATOR") || role.toUpperCase().contains("MANAGER") || role.toUpperCase().contains("COORDENADOR"));
 
-        // 1. ADMIN/CONTROLLER: Vê tudo
         if (ehAdminOuController) {
             return repository.findTop300ByOrderByDataSolicitacaoDesc();
-        }
-        // 2. GESTOR/COORDENADOR: Filtra pelo ID do Segmento no Banco
-        else if (ehGestorSegmentado) {
+        } else if (ehGestorSegmentado) {
             List<Long> segmentosDoUsuario = buscarSegmentosDoUsuario(userId);
 
             if (segmentosDoUsuario.isEmpty()) {
                 return Collections.emptyList();
             }
-
-            // QUERY OTIMIZADA: Não chama o monólito para cada linha
             return repository.findTop300BySegmentoIdInOrderByDataSolicitacaoDesc(segmentosDoUsuario);
-        }
-        // 3. SOLICITANTE COMUM: Vê apenas as suas
-        else if (userId != null) {
+        } else if (userId != null) {
             return repository.findBySolicitanteId(userId);
         }
 
         return Collections.emptyList();
     }
 
+    /**
+     * Tenta conectar ao Monólito usando a URL configurada e o endpoint de health check público.
+     */
     private String descobrirUrlBaseAtiva() {
-        for (String baseUrl : getUrlsMonolito()) {
-            try {
-                // Tenta um ping simples na raiz ou health check
-                ResponseEntity<Map> response = restTemplate.exchange(
-                        baseUrl + "/", HttpMethod.GET, createHttpEntity(null), Map.class
-                );
-                if (response.getStatusCode().is2xxSuccessful()) {
-                    return baseUrl; // Retorna a URL que funcionou
-                }
-            } catch (Exception ignored) {
-            }
-        }
-        throw new RuntimeException("Não foi possível conectar a nenhuma instância do Monólito.");
-    }
+        // Remove barra final se existir para evitar // na URL
+        String baseUrl = monolithUrl.endsWith("/") ? monolithUrl.substring(0, monolithUrl.length() - 1) : monolithUrl;
 
-    // --- CORREÇÃO: LÓGICA DE FILTRO POR SEGMENTO COM LOGS ---
+        try {
+            // Tenta bater no endpoint público criado no HealthController
+            String healthUrl = baseUrl + "/api/public/status";
+
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    healthUrl, HttpMethod.GET, createHttpEntity(null), Map.class
+            );
+
+            if (response.getStatusCode().is2xxSuccessful()) {
+                return baseUrl;
+            }
+        } catch (Exception e) {
+            log.error("Erro ao conectar no health check do Monólito em {}: {}", baseUrl, e.getMessage());
+        }
+
+        // Se a verificação principal falhar, podemos tentar um fallback local apenas para desenvolvimento
+        // Caso contrário, lança erro.
+        throw new RuntimeException("Não foi possível conectar ao Monólito na URL: " + baseUrl);
+    }
 
     private List<SolicitacaoAtividadeComplementar> filtrarPorSegmentoDoUsuario(List<SolicitacaoAtividadeComplementar> lista, Long userId) {
         if (userId == null || lista.isEmpty()) return lista;
@@ -197,36 +197,21 @@ public class SolicitacaoService {
         return null;
     }
 
-    // --- CORREÇÃO PRINCIPAL: INTEGRAÇÃO ROBUSTA COM LOGS ---
-
-    private List<String> getUrlsMonolito() {
-        return List.of(
-                "http://inprout-monolito:8080",
-                "http://inprout-monolito-homolog:8080",
-                "http://localhost:8080",
-                "http://host.docker.internal:8080"
-        );
-    }
-
     private Map<String, Object> buscarNoMonolito(String path) {
         String pathClean = path.startsWith("/") ? path : "/" + path;
+        String baseUrl = descobrirUrlBaseAtiva();
+        String fullUrl = baseUrl + pathClean;
 
-        for (String baseUrl : getUrlsMonolito()) {
-            String fullUrl = baseUrl + pathClean;
-            try {
-                // log.debug("Tentando conectar ao monólito: {}", fullUrl); // Descomente para debug intenso
-                ResponseEntity<Map> response = restTemplate.exchange(
-                        fullUrl, HttpMethod.GET, createHttpEntity(null), Map.class
-                );
-                if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                    return (Map<String, Object>) response.getBody();
-                }
-            } catch (Exception e) {
-                log.warn("Falha ao conectar no Monólito em {}: {}", fullUrl, e.getMessage());
-                // Não retorna null imediatamente, tenta a próxima URL
+        try {
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    fullUrl, HttpMethod.GET, createHttpEntity(null), Map.class
+            );
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                return (Map<String, Object>) response.getBody();
             }
+        } catch (Exception e) {
+            log.warn("Falha ao conectar no Monólito para buscar dados em {}: {}", fullUrl, e.getMessage());
         }
-        log.error("FALHA CRÍTICA: Nenhuma URL do Monólito respondeu para o endpoint {}", path);
         return null;
     }
 
@@ -244,7 +229,6 @@ public class SolicitacaoService {
 
     @Transactional
     public SolicitacaoAtividadeComplementar criar(SolicitacaoDTO.Request dto) {
-        // --- ALTERAÇÃO: Busca o segmento da OS antes de salvar ---
         Long segmentoId = buscarSegmentoDaOs(dto.osId());
 
         SolicitacaoAtividadeComplementar nova = SolicitacaoAtividadeComplementar.builder()
@@ -340,7 +324,6 @@ public class SolicitacaoService {
     }
 
     private void aplicarAlteracoesNoMonolito(SolicitacaoAtividadeComplementar s) throws Exception {
-        // CORREÇÃO 1: Pega a URL que realmente está funcionando, não a primeira da lista fixa
         String baseUrl = descobrirUrlBaseAtiva();
 
         if (s.getAlteracoesPropostasJson() != null && !s.getAlteracoesPropostasJson().isBlank()) {
@@ -354,18 +337,16 @@ public class SolicitacaoService {
                 }
 
                 if (alt.containsKey("novaQtd")) {
-                    // Previne erro se algum valor vier nulo usando HashMap
                     Map<String, Object> payload = new HashMap<>();
                     payload.put("quantidade", alt.get("novaQtd"));
                     payload.put("boq", alt.get("novoBoq") != null ? alt.get("novoBoq") : "");
-                    payload.put("lpu", Map.of("id", alt.get("novaLpuId"))); // ID da LPU não pode ser nulo aqui
+                    payload.put("lpu", Map.of("id", alt.get("novaLpuId")));
 
                     restTemplate.exchange(baseUrl + "/os/detalhe/" + itemId, HttpMethod.PUT, createHttpEntity(payload), Void.class);
                 }
             }
         }
 
-        // CORREÇÃO 2: Substituindo Map.of por HashMap para evitar NullPointerException se algum campo for nulo
         Map<String, Object> novoItem = new HashMap<>();
 
         Map<String, Object> osMap = new HashMap<>();
@@ -373,7 +354,6 @@ public class SolicitacaoService {
         novoItem.put("os", osMap);
 
         Map<String, Object> lpuMap = new HashMap<>();
-        // Garante que não envia nulo no ID da LPU
         lpuMap.put("id", s.getLpuAprovadaId() != null ? s.getLpuAprovadaId() : 0L);
         novoItem.put("lpu", lpuMap);
 

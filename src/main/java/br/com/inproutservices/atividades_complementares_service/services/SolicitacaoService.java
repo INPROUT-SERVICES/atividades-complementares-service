@@ -25,6 +25,7 @@ import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -72,7 +73,6 @@ public class SolicitacaoService {
                 return Collections.emptyList();
             }
 
-            // Busca abrangente (Pendente + Devolvido) sem filtro de segmento no SQL para permitir Self-Healing
             List<SolicitacaoAtividadeComplementar> todasPendentes = repository.findByStatusIn(List.of(
                     StatusSolicitacaoComplementar.PENDENTE_COORDENADOR,
                     StatusSolicitacaoComplementar.DEVOLVIDO_CONTROLLER
@@ -164,7 +164,6 @@ public class SolicitacaoService {
         s.setAprovadorCoordenadorId(dto.aprovadorId());
         s.setDataAcaoCoordenador(LocalDateTime.now());
 
-        // Volta para o Controller após correção
         s.setStatus(StatusSolicitacaoComplementar.PENDENTE_CONTROLLER);
 
         return repository.save(s);
@@ -211,7 +210,7 @@ public class SolicitacaoService {
         else if (roleOrigem != null && roleOrigem.toUpperCase().contains("CONTROLLER")) {
             s.setAprovadorControllerId(aprovadorId);
             s.setDataAcaoController(LocalDateTime.now());
-            s.setStatus(StatusSolicitacaoComplementar.DEVOLVIDO_CONTROLLER); // Correção do Status
+            s.setStatus(StatusSolicitacaoComplementar.DEVOLVIDO_CONTROLLER);
             s.setJustificativaController(motivo);
         } else {
             s.setStatus(StatusSolicitacaoComplementar.REJEITADO);
@@ -235,7 +234,6 @@ public class SolicitacaoService {
 
                     if (itemId == null) continue;
 
-                    // Ação 1: Atualizar Status (PATCH)
                     if (alt.containsKey("novoStatus")) {
                         restTemplate.exchange(
                                 baseUrl + "/os/detalhe/" + itemId + "/status",
@@ -245,17 +243,15 @@ public class SolicitacaoService {
                         );
                     }
 
-                    // Ação 2: Atualizar Quantidade/LPU (PUT)
                     if (alt.containsKey("novaQtd")) {
                         Map<String, Object> payload = new HashMap<>();
-                        // Usa convertToLong para evitar ClassCastException (Integer -> Long)
-                        payload.put("quantidade", convertToLong(alt.get("novaQtd")));
+                        Long qtdLong = convertToLong(alt.get("novaQtd"));
+                        payload.put("quantidade", qtdLong != null ? qtdLong.intValue() : 0);
                         payload.put("boq", alt.get("novoBoq") != null ? alt.get("novoBoq").toString() : "");
 
                         Long novaLpuId = convertToLong(alt.get("novaLpuId"));
                         if (novaLpuId != null) {
-                            // Envia ID como Inteiro para compatibilidade com intValue() no Monólito
-                            payload.put("lpu", Map.of("id", novaLpuId.intValue()));
+                            payload.put("lpu", Map.of("id", novaLpuId));
                         }
 
                         restTemplate.exchange(
@@ -269,37 +265,58 @@ public class SolicitacaoService {
             }
         }
 
-        // 2. Cria o novo item (POST) - Payload Seguro
+        // =========================================================================
+        // 2. CRIA O NOVO ITEM (POST) - COM PREENCHIMENTO COMPLETO
+        // =========================================================================
+
+        // Passo A: Buscar Dados da OS Original (Site, Regional, Gestor)
+        Map<String, Object> dadosOs = buscarNoMonolito("/os/" + s.getOsId());
+        String site = dadosOs != null ? (String) dadosOs.get("site") : "";
+        String regional = dadosOs != null ? (String) dadosOs.get("regional") : "";
+        String gestorTim = dadosOs != null ? (String) dadosOs.get("gestorTim") : ""; // Verifica se é "gestor" ou "gestorTim" no JSON original
+
+        // Passo B: Buscar Dados da LPU Selecionada (Unidade, Contrato, Item)
+        Long lpuIdFinal = s.getLpuAprovadaId() != null ? s.getLpuAprovadaId() : s.getLpuId();
+        Map<String, Object> dadosLpu = buscarNoMonolito("/lpu/" + lpuIdFinal); // Endpoint padrão do Monólito
+
+        String unidade = dadosLpu != null ? (String) dadosLpu.get("unidade") : "";
+        String itemDesc = dadosLpu != null ? (String) dadosLpu.get("nome") : ""; // Geralmente 'nome' ou 'descricao'
+        Object contratoRef = dadosLpu != null ? dadosLpu.get("contrato") : null;
+
+        // Passo C: Montar Payload Rico
         Map<String, Object> novoItem = new HashMap<>();
 
-        // Estrutura OS
+        // Referências
         Map<String, Object> osRef = new HashMap<>();
-        // PROTEÇÃO CONTRA NULOS NO OS ID
-        if (s.getOsId() != null) {
-            osRef.put("id", s.getOsId().intValue());
-        }
+        if (s.getOsId() != null) osRef.put("id", s.getOsId());
         novoItem.put("os", osRef);
 
-        // Estrutura LPU
-        Long lpuIdFinal = s.getLpuAprovadaId() != null ? s.getLpuAprovadaId() : s.getLpuId();
-        if (lpuIdFinal != null) {
-            Map<String, Object> lpuRef = new HashMap<>();
-            lpuRef.put("id", lpuIdFinal.intValue()); // Envia como int
-            novoItem.put("lpu", lpuRef);
-        } else {
-            // Se não houver ID, o monólito pode reclamar, mas evitamos o NPE aqui
-            novoItem.put("lpu", null);
-        }
+        Map<String, Object> lpuRef = new HashMap<>();
+        if (lpuIdFinal != null) lpuRef.put("id", lpuIdFinal);
+        novoItem.put("lpu", lpuRef);
 
-        // Dados simples
-        Long qtd = s.getQuantidadeAprovada() != null ? s.getQuantidadeAprovada() : s.getQuantidade();
-        novoItem.put("quantidade", qtd != null ? qtd.intValue() : 0);
+        // Campos copiados da OS
+        novoItem.put("site", site);
+        novoItem.put("regional", regional);
+        novoItem.put("gestorTim", gestorTim);
 
+        // Campos copiados da LPU
+        novoItem.put("unidade", unidade);
+        novoItem.put("item", itemDesc); // Nome do item
+        if (contratoRef != null) novoItem.put("contrato", contratoRef);
+
+        // Campos calculados
+        Integer qtd = s.getQuantidadeAprovada() != null ? s.getQuantidadeAprovada() : s.getQuantidade();
+        novoItem.put("quantidade", qtd != null ? qtd : 0);
         novoItem.put("boq", s.getBoqAprovado() != null ? s.getBoqAprovado() : "");
         novoItem.put("statusRegistro", s.getStatusRegistroAprovado() != null ? s.getStatusRegistroAprovado() : "ATIVO");
 
-        // Log para debug
-        log.info("Enviando POST para Monólito (OS {}): {}", s.getOsId(), objectMapper.writeValueAsString(novoItem));
+        // Observação Formatada
+        String dataHora = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"));
+        String obs = "OS gerada automaticamente (atividade complementar) em " + dataHora;
+        novoItem.put("observacoes", obs);
+
+        log.info("Enviando POST detalhado para Monólito (OS {}): {}", s.getOsId(), objectMapper.writeValueAsString(novoItem));
 
         restTemplate.postForObject(baseUrl + "/os/detalhe", createHttpEntity(novoItem), Object.class);
     }
@@ -320,25 +337,6 @@ public class SolicitacaoService {
             log.error("Erro ao conectar no health check do Monólito em {}: {}", baseUrl, e.getMessage());
         }
         throw new RuntimeException("Não foi possível conectar ao Monólito na URL: " + baseUrl);
-    }
-
-    // Este método foi mantido para evitar perder lógica, embora a busca principal use o novo método.
-    private List<SolicitacaoAtividadeComplementar> filtrarPorSegmentoDoUsuario(List<SolicitacaoAtividadeComplementar> lista, Long userId) {
-        if (userId == null || lista.isEmpty()) return lista;
-
-        List<Long> segmentosDoUsuario = buscarSegmentosDoUsuario(userId);
-
-        if (segmentosDoUsuario.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        cacheSegmentoOs.clear();
-        return lista.stream()
-                .filter(solicitacao -> {
-                    Long segmentoOsId = buscarSegmentoDaOs(solicitacao.getOsId());
-                    return segmentoOsId != null && segmentosDoUsuario.contains(segmentoOsId);
-                })
-                .collect(Collectors.toList());
     }
 
     private List<Long> buscarSegmentosDoUsuario(Long userId) {
@@ -364,7 +362,6 @@ public class SolicitacaoService {
         if (cacheSegmentoOs.containsKey(osId)) return cacheSegmentoOs.get(osId);
 
         try {
-            // Tenta buscar endpoint leve primeiro se existir
             Map<String, Object> map = buscarNoMonolito("/os/" + osId);
             if (map != null && map.get("segmento") instanceof Map) {
                 Map<String, Object> segMap = (Map<String, Object>) map.get("segmento");

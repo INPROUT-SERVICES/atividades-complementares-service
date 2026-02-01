@@ -10,20 +10,15 @@ import java.util.List;
 @Repository
 public interface SolicitacaoAtividadeComplementarRepository extends JpaRepository<SolicitacaoAtividadeComplementar, Long> {
 
-    // Filtros básicos
     List<SolicitacaoAtividadeComplementar> findByStatus(StatusSolicitacaoComplementar status);
 
-    List<SolicitacaoAtividadeComplementar> findByStatusIn(List<StatusSolicitacaoComplementar> statusList);
+    List<SolicitacaoAtividadeComplementar> findByStatusIn(List<StatusSolicitacaoComplementar> statuses);
+
+    List<SolicitacaoAtividadeComplementar> findByStatusInAndSegmentoIdIn(List<StatusSolicitacaoComplementar> statuses, List<Long> segmentoIds);
 
     List<SolicitacaoAtividadeComplementar> findBySolicitanteId(Long solicitanteId);
 
+    // Métodos para histórico (já existentes no seu código, manter)
     List<SolicitacaoAtividadeComplementar> findTop300ByOrderByDataSolicitacaoDesc();
-
-    List<SolicitacaoAtividadeComplementar> findByStatusAndSegmentoIdIn(
-            StatusSolicitacaoComplementar status,
-            List<Long> segmentoIds
-    );
-
     List<SolicitacaoAtividadeComplementar> findTop300BySegmentoIdInOrderByDataSolicitacaoDesc(List<Long> segmentoIds);
-
 }

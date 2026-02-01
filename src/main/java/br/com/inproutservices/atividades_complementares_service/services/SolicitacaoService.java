@@ -38,7 +38,6 @@ public class SolicitacaoService {
     private final ObjectMapper objectMapper;
     private final Map<Long, Long> cacheSegmentoOs = new HashMap<>();
 
-    // Injeta a URL definida no Docker Compose ou application.yaml
     @Value("${APP_MONOLITH_URL:http://inprout-monolito:8080}")
     private String monolithUrl;
 
@@ -57,17 +56,14 @@ public class SolicitacaoService {
         String roleUpper = role.toUpperCase();
 
         if (roleUpper.contains("ADMIN") || roleUpper.contains("CONTROLLER")) {
-            StatusSolicitacaoComplementar statusAlvo = roleUpper.contains("CONTROLLER")
-                    ? StatusSolicitacaoComplementar.PENDENTE_CONTROLLER
-                    : StatusSolicitacaoComplementar.PENDENTE_COORDENADOR;
-
             if (roleUpper.contains("ADMIN")) {
                 return repository.findByStatusIn(List.of(
                         StatusSolicitacaoComplementar.PENDENTE_COORDENADOR,
-                        StatusSolicitacaoComplementar.PENDENTE_CONTROLLER
+                        StatusSolicitacaoComplementar.PENDENTE_CONTROLLER,
+                        StatusSolicitacaoComplementar.DEVOLVIDO_CONTROLLER
                 ));
             }
-            return repository.findByStatus(statusAlvo);
+            return repository.findByStatus(StatusSolicitacaoComplementar.PENDENTE_CONTROLLER);
         } else if (roleUpper.contains("COORDINATOR") || roleUpper.contains("COORDENADOR")) {
             List<Long> segmentosDoUsuario = buscarSegmentosDoUsuario(userId);
 
@@ -76,13 +72,37 @@ public class SolicitacaoService {
                 return Collections.emptyList();
             }
 
-            return repository.findByStatusAndSegmentoIdIn(
+            // Busca abrangente (Pendente + Devolvido) sem filtro de segmento no SQL para permitir Self-Healing
+            List<SolicitacaoAtividadeComplementar> todasPendentes = repository.findByStatusIn(List.of(
                     StatusSolicitacaoComplementar.PENDENTE_COORDENADOR,
-                    segmentosDoUsuario
-            );
+                    StatusSolicitacaoComplementar.DEVOLVIDO_CONTROLLER
+            ));
+
+            return todasPendentes.stream()
+                    .filter(solicitacao -> validarOuAtualizarSegmento(solicitacao, segmentosDoUsuario))
+                    .collect(Collectors.toList());
         }
 
         return Collections.emptyList();
+    }
+
+    private boolean validarOuAtualizarSegmento(SolicitacaoAtividadeComplementar solicitacao, List<Long> segmentosUsuario) {
+        Long segmentoId = solicitacao.getSegmentoId();
+
+        if (segmentoId != null) {
+            return segmentosUsuario.contains(segmentoId);
+        }
+
+        log.info("Solicitação {} está com segmento NULL. Buscando no Monólito...", solicitacao.getId());
+        Long segmentoRecuperado = buscarSegmentoDaOs(solicitacao.getOsId());
+
+        if (segmentoRecuperado != null) {
+            solicitacao.setSegmentoId(segmentoRecuperado);
+            repository.save(solicitacao);
+            return segmentosUsuario.contains(segmentoRecuperado);
+        }
+
+        return false;
     }
 
     public List<SolicitacaoAtividadeComplementar> listarHistorico(String role, Long userId) {
@@ -93,68 +113,230 @@ public class SolicitacaoService {
             return repository.findTop300ByOrderByDataSolicitacaoDesc();
         } else if (ehGestorSegmentado) {
             List<Long> segmentosDoUsuario = buscarSegmentosDoUsuario(userId);
-
-            if (segmentosDoUsuario.isEmpty()) {
-                return Collections.emptyList();
-            }
+            if (segmentosDoUsuario.isEmpty()) return Collections.emptyList();
             return repository.findTop300BySegmentoIdInOrderByDataSolicitacaoDesc(segmentosDoUsuario);
         } else if (userId != null) {
             return repository.findBySolicitanteId(userId);
         }
-
         return Collections.emptyList();
     }
 
-    /**
-     * Tenta conectar ao Monólito usando a URL configurada e o endpoint de health check público.
-     */
-    private String descobrirUrlBaseAtiva() {
-        // Remove barra final se existir para evitar // na URL
-        String baseUrl = monolithUrl.endsWith("/") ? monolithUrl.substring(0, monolithUrl.length() - 1) : monolithUrl;
+    public List<SolicitacaoAtividadeComplementar> listarPorSolicitante(Long solicitanteId) {
+        return repository.findBySolicitanteId(solicitanteId);
+    }
+
+    // --- MÉTODOS DE AÇÃO ---
+
+    @Transactional
+    public SolicitacaoAtividadeComplementar criar(SolicitacaoDTO.Request dto) {
+        Long segmentoId = buscarSegmentoDaOs(dto.osId());
+
+        SolicitacaoAtividadeComplementar nova = SolicitacaoAtividadeComplementar.builder()
+                .osId(dto.osId())
+                .segmentoId(segmentoId)
+                .lpuId(dto.lpuId())
+                .quantidade(dto.quantidade())
+                .solicitanteId(dto.solicitanteId())
+                .solicitanteNomeSnapshot(dto.solicitanteNome())
+                .valorUnitarioSnapshot(dto.valorUnitarioLpu())
+                .justificativa(dto.justificativa())
+                .status(StatusSolicitacaoComplementar.PENDENTE_COORDENADOR)
+                .build();
+        return repository.save(nova);
+    }
+
+    @Transactional
+    public SolicitacaoAtividadeComplementar aprovarPeloCoordenador(Long id, SolicitacaoDTO.EdicaoCoordenadorDTO dto) {
+        SolicitacaoAtividadeComplementar s = buscarPorId(id);
+
+        boolean statusValido = s.getStatus() == StatusSolicitacaoComplementar.PENDENTE_COORDENADOR ||
+                s.getStatus() == StatusSolicitacaoComplementar.DEVOLVIDO_CONTROLLER;
+
+        if (!statusValido) throw new RuntimeException("Status inválido para edição do coordenador.");
+
+        s.setLpuAprovadaId(dto.lpuId());
+        s.setQuantidadeAprovada(dto.quantidade());
+        s.setBoqAprovado(dto.boq());
+        s.setStatusRegistroAprovado(dto.statusRegistro());
+        s.setJustificativaCoordenador(dto.justificativa());
+        if (dto.alteracoesItensExistentesJson() != null) s.setAlteracoesPropostasJson(dto.alteracoesItensExistentesJson());
+
+        s.setAprovadorCoordenadorId(dto.aprovadorId());
+        s.setDataAcaoCoordenador(LocalDateTime.now());
+
+        // Volta para o Controller após correção
+        s.setStatus(StatusSolicitacaoComplementar.PENDENTE_CONTROLLER);
+
+        return repository.save(s);
+    }
+
+    @Transactional
+    public SolicitacaoAtividadeComplementar aprovarPeloController(Long id, SolicitacaoDTO.EdicaoCoordenadorDTO dto) {
+        SolicitacaoAtividadeComplementar s = buscarPorId(id);
+        if (s.getStatus() != StatusSolicitacaoComplementar.PENDENTE_CONTROLLER) {
+            throw new RuntimeException("Status inválido. Esperado PENDENTE_CONTROLLER.");
+        }
+
+        if (dto.lpuId() != null) s.setLpuAprovadaId(dto.lpuId());
+        if (dto.quantidade() != null) s.setQuantidadeAprovada(dto.quantidade());
+        if (dto.boq() != null) s.setBoqAprovado(dto.boq());
+        if (dto.statusRegistro() != null) s.setStatusRegistroAprovado(dto.statusRegistro());
+        if (dto.alteracoesItensExistentesJson() != null) s.setAlteracoesPropostasJson(dto.alteracoesItensExistentesJson());
 
         try {
-            // Tenta bater no endpoint público criado no HealthController
+            aplicarAlteracoesNoMonolito(s);
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw new RuntimeException("Erro ao integrar com o Monólito: " + e.getMessage());
+        }
+
+        s.setAprovadorControllerId(dto.aprovadorId());
+        s.setDataAcaoController(LocalDateTime.now());
+        s.setStatus(StatusSolicitacaoComplementar.APROVADO);
+
+        return repository.save(s);
+    }
+
+    @Transactional
+    public SolicitacaoAtividadeComplementar rejeitar(Long id, Long aprovadorId, String motivo, String roleOrigem) {
+        SolicitacaoAtividadeComplementar s = buscarPorId(id);
+        if (motivo == null || motivo.isBlank()) throw new RuntimeException("Motivo obrigatório.");
+
+        if (roleOrigem != null && roleOrigem.toUpperCase().contains("COORDINATOR")) {
+            s.setAprovadorCoordenadorId(aprovadorId);
+            s.setDataAcaoCoordenador(LocalDateTime.now());
+            s.setStatus(StatusSolicitacaoComplementar.REJEITADO);
+            s.setMotivoRecusa(motivo);
+        }
+        else if (roleOrigem != null && roleOrigem.toUpperCase().contains("CONTROLLER")) {
+            s.setAprovadorControllerId(aprovadorId);
+            s.setDataAcaoController(LocalDateTime.now());
+            s.setStatus(StatusSolicitacaoComplementar.DEVOLVIDO_CONTROLLER); // Correção do Status
+            s.setJustificativaController(motivo);
+        } else {
+            s.setStatus(StatusSolicitacaoComplementar.REJEITADO);
+            s.setMotivoRecusa(motivo);
+        }
+        return repository.save(s);
+    }
+
+    // --- MÉTODOS AUXILIARES ---
+
+    private void aplicarAlteracoesNoMonolito(SolicitacaoAtividadeComplementar s) throws Exception {
+        String baseUrl = descobrirUrlBaseAtiva();
+
+        // 1. Processa alterações (Buffer) - Itens existentes
+        if (s.getAlteracoesPropostasJson() != null && !s.getAlteracoesPropostasJson().isBlank()) {
+            List<Map<String, Object>> alteracoes = objectMapper.readValue(s.getAlteracoesPropostasJson(), new TypeReference<List<Map<String, Object>>>() {});
+
+            if (alteracoes != null) {
+                for (Map<String, Object> alt : alteracoes) {
+                    Long itemId = convertToLong(alt.get("itemId"));
+
+                    if (itemId == null) continue;
+
+                    // Ação 1: Atualizar Status (PATCH)
+                    if (alt.containsKey("novoStatus")) {
+                        restTemplate.exchange(
+                                baseUrl + "/os/detalhe/" + itemId + "/status",
+                                HttpMethod.PATCH,
+                                createHttpEntity(Map.of("status", alt.get("novoStatus"))),
+                                Void.class
+                        );
+                    }
+
+                    // Ação 2: Atualizar Quantidade/LPU (PUT)
+                    if (alt.containsKey("novaQtd")) {
+                        Map<String, Object> payload = new HashMap<>();
+                        // Usa convertToLong para evitar ClassCastException (Integer -> Long)
+                        payload.put("quantidade", convertToLong(alt.get("novaQtd")));
+                        payload.put("boq", alt.get("novoBoq") != null ? alt.get("novoBoq").toString() : "");
+
+                        Long novaLpuId = convertToLong(alt.get("novaLpuId"));
+                        if (novaLpuId != null) {
+                            // Envia ID como Inteiro para compatibilidade com intValue() no Monólito
+                            payload.put("lpu", Map.of("id", novaLpuId.intValue()));
+                        }
+
+                        restTemplate.exchange(
+                                baseUrl + "/os/detalhe/" + itemId,
+                                HttpMethod.PUT,
+                                createHttpEntity(payload),
+                                Void.class
+                        );
+                    }
+                }
+            }
+        }
+
+        // 2. Cria o novo item (POST) - Payload Seguro
+        Map<String, Object> novoItem = new HashMap<>();
+
+        // Estrutura OS
+        Map<String, Object> osRef = new HashMap<>();
+        // PROTEÇÃO CONTRA NULOS NO OS ID
+        if (s.getOsId() != null) {
+            osRef.put("id", s.getOsId().intValue());
+        }
+        novoItem.put("os", osRef);
+
+        // Estrutura LPU
+        Long lpuIdFinal = s.getLpuAprovadaId() != null ? s.getLpuAprovadaId() : s.getLpuId();
+        if (lpuIdFinal != null) {
+            Map<String, Object> lpuRef = new HashMap<>();
+            lpuRef.put("id", lpuIdFinal.intValue()); // Envia como int
+            novoItem.put("lpu", lpuRef);
+        } else {
+            // Se não houver ID, o monólito pode reclamar, mas evitamos o NPE aqui
+            novoItem.put("lpu", null);
+        }
+
+        // Dados simples
+        Long qtd = s.getQuantidadeAprovada() != null ? s.getQuantidadeAprovada() : s.getQuantidade();
+        novoItem.put("quantidade", qtd != null ? qtd.intValue() : 0);
+
+        novoItem.put("boq", s.getBoqAprovado() != null ? s.getBoqAprovado() : "");
+        novoItem.put("statusRegistro", s.getStatusRegistroAprovado() != null ? s.getStatusRegistroAprovado() : "ATIVO");
+
+        // Log para debug
+        log.info("Enviando POST para Monólito (OS {}): {}", s.getOsId(), objectMapper.writeValueAsString(novoItem));
+
+        restTemplate.postForObject(baseUrl + "/os/detalhe", createHttpEntity(novoItem), Object.class);
+    }
+
+    public SolicitacaoAtividadeComplementar buscarPorId(Long id) {
+        return repository.findById(id).orElseThrow(() -> new EntityNotFoundException("Não encontrado: " + id));
+    }
+
+    private String descobrirUrlBaseAtiva() {
+        String baseUrl = monolithUrl.endsWith("/") ? monolithUrl.substring(0, monolithUrl.length() - 1) : monolithUrl;
+        try {
             String healthUrl = baseUrl + "/api/public/status";
-
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    healthUrl, HttpMethod.GET, createHttpEntity(null), Map.class
-            );
-
+            ResponseEntity<Map> response = restTemplate.exchange(healthUrl, HttpMethod.GET, createHttpEntity(null), Map.class);
             if (response.getStatusCode().is2xxSuccessful()) {
                 return baseUrl;
             }
         } catch (Exception e) {
             log.error("Erro ao conectar no health check do Monólito em {}: {}", baseUrl, e.getMessage());
         }
-
-        // Se a verificação principal falhar, podemos tentar um fallback local apenas para desenvolvimento
-        // Caso contrário, lança erro.
         throw new RuntimeException("Não foi possível conectar ao Monólito na URL: " + baseUrl);
     }
 
+    // Este método foi mantido para evitar perder lógica, embora a busca principal use o novo método.
     private List<SolicitacaoAtividadeComplementar> filtrarPorSegmentoDoUsuario(List<SolicitacaoAtividadeComplementar> lista, Long userId) {
         if (userId == null || lista.isEmpty()) return lista;
 
         List<Long> segmentosDoUsuario = buscarSegmentosDoUsuario(userId);
 
         if (segmentosDoUsuario.isEmpty()) {
-            log.warn("Usuário ID {} não possui segmentos vinculados ou a API do monólito falhou.", userId);
             return Collections.emptyList();
         }
-
-        log.info("Usuário ID {} possui segmentos: {}", userId, segmentosDoUsuario);
 
         cacheSegmentoOs.clear();
         return lista.stream()
                 .filter(solicitacao -> {
                     Long segmentoOsId = buscarSegmentoDaOs(solicitacao.getOsId());
-                    boolean permitido = segmentoOsId != null && segmentosDoUsuario.contains(segmentoOsId);
-
-                    if (!permitido) {
-                        log.debug("Solicitação {} (OS {}) filtrada. Segmento OS: {}", solicitacao.getId(), solicitacao.getOsId(), segmentoOsId);
-                    }
-
-                    return permitido;
+                    return segmentoOsId != null && segmentosDoUsuario.contains(segmentoOsId);
                 })
                 .collect(Collectors.toList());
     }
@@ -182,14 +364,15 @@ public class SolicitacaoService {
         if (cacheSegmentoOs.containsKey(osId)) return cacheSegmentoOs.get(osId);
 
         try {
+            // Tenta buscar endpoint leve primeiro se existir
             Map<String, Object> map = buscarNoMonolito("/os/" + osId);
             if (map != null && map.get("segmento") instanceof Map) {
                 Map<String, Object> segMap = (Map<String, Object>) map.get("segmento");
                 Long segId = convertToLong(segMap.get("id"));
-                cacheSegmentoOs.put(osId, segId);
-                return segId;
-            } else {
-                log.warn("OS {} retornou sem objeto 'segmento' válido.", osId);
+                if (segId != null) {
+                    cacheSegmentoOs.put(osId, segId);
+                    return segId;
+                }
             }
         } catch (Exception e) {
             log.error("Erro ao buscar segmento da OS {}: {}", osId, e.getMessage());
@@ -210,7 +393,7 @@ public class SolicitacaoService {
                 return (Map<String, Object>) response.getBody();
             }
         } catch (Exception e) {
-            log.warn("Falha ao conectar no Monólito para buscar dados em {}: {}", fullUrl, e.getMessage());
+            log.warn("Falha ao buscar dados no Monólito em {}: {}", fullUrl, e.getMessage());
         }
         return null;
     }
@@ -225,143 +408,6 @@ public class SolicitacaoService {
             if (authHeader != null) headers.set("Authorization", authHeader);
         }
         return new HttpEntity<>(body, headers);
-    }
-
-    @Transactional
-    public SolicitacaoAtividadeComplementar criar(SolicitacaoDTO.Request dto) {
-        Long segmentoId = buscarSegmentoDaOs(dto.osId());
-
-        SolicitacaoAtividadeComplementar nova = SolicitacaoAtividadeComplementar.builder()
-                .osId(dto.osId())
-                .segmentoId(segmentoId)
-                .lpuId(dto.lpuId())
-                .quantidade(dto.quantidade())
-                .solicitanteId(dto.solicitanteId())
-                .solicitanteNomeSnapshot(dto.solicitanteNome())
-                .valorUnitarioSnapshot(dto.valorUnitarioLpu())
-                .justificativa(dto.justificativa())
-                .status(StatusSolicitacaoComplementar.PENDENTE_COORDENADOR)
-                .build();
-        return repository.save(nova);
-    }
-
-    public SolicitacaoAtividadeComplementar buscarPorId(Long id) {
-        return repository.findById(id).orElseThrow(() -> new EntityNotFoundException("Não encontrado: " + id));
-    }
-
-    public List<SolicitacaoAtividadeComplementar> listarPorSolicitante(Long solicitanteId) {
-        return repository.findBySolicitanteId(solicitanteId);
-    }
-
-    @Transactional
-    public SolicitacaoAtividadeComplementar aprovarPeloCoordenador(Long id, SolicitacaoDTO.EdicaoCoordenadorDTO dto) {
-        SolicitacaoAtividadeComplementar s = buscarPorId(id);
-        if (s.getStatus() != StatusSolicitacaoComplementar.PENDENTE_COORDENADOR) throw new RuntimeException("Status inválido.");
-
-        s.setLpuAprovadaId(dto.lpuId());
-        s.setQuantidadeAprovada(dto.quantidade());
-        s.setBoqAprovado(dto.boq());
-        s.setStatusRegistroAprovado(dto.statusRegistro());
-        s.setJustificativaCoordenador(dto.justificativa());
-        if (dto.alteracoesItensExistentesJson() != null) s.setAlteracoesPropostasJson(dto.alteracoesItensExistentesJson());
-
-        s.setAprovadorCoordenadorId(dto.aprovadorId());
-        s.setDataAcaoCoordenador(LocalDateTime.now());
-        s.setStatus(StatusSolicitacaoComplementar.PENDENTE_CONTROLLER);
-        return repository.save(s);
-    }
-
-    @Transactional
-    public SolicitacaoAtividadeComplementar aprovarPeloController(Long id, SolicitacaoDTO.EdicaoCoordenadorDTO dto) {
-        SolicitacaoAtividadeComplementar s = buscarPorId(id);
-        if (s.getStatus() != StatusSolicitacaoComplementar.PENDENTE_CONTROLLER) {
-            throw new RuntimeException("Status inválido. Esperado PENDENTE_CONTROLLER.");
-        }
-
-        if (dto.lpuId() != null) s.setLpuAprovadaId(dto.lpuId());
-        if (dto.quantidade() != null) s.setQuantidadeAprovada(dto.quantidade());
-        if (dto.boq() != null) s.setBoqAprovado(dto.boq());
-        if (dto.statusRegistro() != null) s.setStatusRegistroAprovado(dto.statusRegistro());
-
-        if (dto.alteracoesItensExistentesJson() != null) {
-            s.setAlteracoesPropostasJson(dto.alteracoesItensExistentesJson());
-        }
-
-        try {
-            aplicarAlteracoesNoMonolito(s);
-        } catch (Exception e) {
-            e.printStackTrace();
-            throw new RuntimeException("Erro ao integrar com o Monólito: " + e.getMessage());
-        }
-
-        s.setAprovadorControllerId(dto.aprovadorId());
-        s.setDataAcaoController(LocalDateTime.now());
-        s.setStatus(StatusSolicitacaoComplementar.APROVADO);
-
-        return repository.save(s);
-    }
-
-    @Transactional
-    public SolicitacaoAtividadeComplementar rejeitar(Long id, Long aprovadorId, String motivo, String roleOrigem) {
-        SolicitacaoAtividadeComplementar s = buscarPorId(id);
-        if (motivo == null || motivo.isBlank()) throw new RuntimeException("Motivo obrigatório.");
-
-        if (roleOrigem != null && roleOrigem.toUpperCase().contains("COORDINATOR")) {
-            s.setAprovadorCoordenadorId(aprovadorId);
-            s.setDataAcaoCoordenador(LocalDateTime.now());
-            s.setStatus(StatusSolicitacaoComplementar.REJEITADO);
-            s.setMotivoRecusa(motivo);
-        } else if (roleOrigem != null && roleOrigem.toUpperCase().contains("CONTROLLER")) {
-            s.setAprovadorControllerId(aprovadorId);
-            s.setDataAcaoController(LocalDateTime.now());
-            s.setStatus(StatusSolicitacaoComplementar.PENDENTE_COORDENADOR);
-            s.setJustificativaController(motivo);
-        } else {
-            s.setStatus(StatusSolicitacaoComplementar.REJEITADO);
-            s.setMotivoRecusa(motivo);
-        }
-        return repository.save(s);
-    }
-
-    private void aplicarAlteracoesNoMonolito(SolicitacaoAtividadeComplementar s) throws Exception {
-        String baseUrl = descobrirUrlBaseAtiva();
-
-        if (s.getAlteracoesPropostasJson() != null && !s.getAlteracoesPropostasJson().isBlank()) {
-            List<Map<String, Object>> alteracoes = objectMapper.readValue(s.getAlteracoesPropostasJson(), new TypeReference<List<Map<String, Object>>>() {});
-
-            for (Map<String, Object> alt : alteracoes) {
-                Long itemId = convertToLong(alt.get("itemId"));
-
-                if (alt.containsKey("novoStatus")) {
-                    restTemplate.exchange(baseUrl + "/os/detalhe/" + itemId + "/status", HttpMethod.PATCH, createHttpEntity(Map.of("status", alt.get("novoStatus"))), Void.class);
-                }
-
-                if (alt.containsKey("novaQtd")) {
-                    Map<String, Object> payload = new HashMap<>();
-                    payload.put("quantidade", alt.get("novaQtd"));
-                    payload.put("boq", alt.get("novoBoq") != null ? alt.get("novoBoq") : "");
-                    payload.put("lpu", Map.of("id", alt.get("novaLpuId")));
-
-                    restTemplate.exchange(baseUrl + "/os/detalhe/" + itemId, HttpMethod.PUT, createHttpEntity(payload), Void.class);
-                }
-            }
-        }
-
-        Map<String, Object> novoItem = new HashMap<>();
-
-        Map<String, Object> osMap = new HashMap<>();
-        osMap.put("id", s.getOsId());
-        novoItem.put("os", osMap);
-
-        Map<String, Object> lpuMap = new HashMap<>();
-        lpuMap.put("id", s.getLpuAprovadaId() != null ? s.getLpuAprovadaId() : 0L);
-        novoItem.put("lpu", lpuMap);
-
-        novoItem.put("quantidade", s.getQuantidadeAprovada() != null ? s.getQuantidadeAprovada() : 0);
-        novoItem.put("boq", s.getBoqAprovado() != null ? s.getBoqAprovado() : "");
-        novoItem.put("statusRegistro", s.getStatusRegistroAprovado() != null ? s.getStatusRegistroAprovado() : "ATIVO");
-
-        restTemplate.postForObject(baseUrl + "/os/detalhe", createHttpEntity(novoItem), Object.class);
     }
 
     private Long convertToLong(Object o) {
